@@ -23,6 +23,8 @@ FROM python:3.11-slim
 RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     ca-certificates \
+    git \
+    openssh-client \
     tini \
   && rm -rf /var/lib/apt/lists/*
 
