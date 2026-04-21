@@ -142,6 +142,23 @@ Docker build arg:
 
 Override in Railway if you want to pin a tag or commit.
 
+## Vendor patches
+
+The Dockerfile applies a small set of vendor patches to the Hermes
+source tree during the builder stage (see `patches/`). Each patch is
+idempotent and marker-guarded, so rebuilding is safe. Current patches:
+
+- **slack-strict-mention** — adds a `slack.strict_mention: true` config
+  key (Hermes PR [#12258](https://github.com/NousResearch/hermes-agent/pull/12258),
+  still open upstream at time of writing). When enabled, channel
+  threads require an explicit `@mention` on every message to trigger
+  the bot, instead of auto-replying to any message under a thread
+  the bot has touched.
+
+Remove a patch from `patches/apply-hermes-patches.py` once it lands
+in an upstream Hermes release this template's `HERMES_GIT_REF`
+resolves to.
+
 ## Local smoke test
 
 ```bash
