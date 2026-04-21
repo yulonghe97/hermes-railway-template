@@ -11,6 +11,13 @@ RUN apt-get update \
 WORKDIR /opt
 RUN git clone --depth 1 --branch "${HERMES_GIT_REF}" --recurse-submodules https://github.com/NousResearch/hermes-agent.git
 
+# Apply vendor patches against the Hermes source before install. Each
+# patch is idempotent and guarded by a marker check — remove a patch
+# once it lands in an upstream Hermes release this template's
+# HERMES_GIT_REF resolves to. See patches/apply-hermes-patches.py.
+COPY patches /tmp/patches
+RUN python3 /tmp/patches/apply-hermes-patches.py && rm -rf /tmp/patches
+
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
 
