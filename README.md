@@ -138,9 +138,13 @@ Entrypoint (`scripts/entrypoint.sh`) does the following:
 
 Docker build arg:
 
-- `HERMES_GIT_REF` (default: `main`)
+- `HERMES_GIT_REF` (default: a pinned Hermes commit SHA, see Dockerfile)
 
-Override in Railway if you want to pin a tag or commit.
+The default is a specific SHA the vendor patches have been tested
+against. Override at build time to track a different upstream ref:
+`docker build --build-arg HERMES_GIT_REF=main ...`. Bumping the
+default SHA means re-running `scripts/test-patches.sh` to verify every
+patch's anchor still exists in the new tree.
 
 ## Vendor patches
 
@@ -154,10 +158,20 @@ idempotent and marker-guarded, so rebuilding is safe. Current patches:
   threads require an explicit `@mention` on every message to trigger
   the bot, instead of auto-replying to any message under a thread
   the bot has touched.
+- **send-message-edit-action** — exposes `action="edit"` on the
+  built-in `send_message` tool so the agent can update a previously-
+  sent message instead of having to post a fresh one. Routes to
+  Slack's `chat.update` via the same token/proxy path the tool uses
+  for `send`. Telegram / Discord / Matrix / etc. return a clear
+  "not yet implemented" error rather than silently falling back to a
+  new send. No upstream PR yet — the plan is to port this back to
+  `NousResearch/hermes-agent` next and drop the patch once it merges.
 
 Remove a patch from `patches/apply-hermes-patches.py` once it lands
 in an upstream Hermes release this template's `HERMES_GIT_REF`
-resolves to.
+resolves to. Verify the patches still apply cleanly with
+`scripts/test-patches.sh` (no Docker required — clones Hermes at the
+pinned SHA, runs the script, checks idempotency + markers).
 
 ## Local smoke test
 
