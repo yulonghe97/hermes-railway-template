@@ -1,11 +1,11 @@
 FROM python:3.11-slim AS builder
 
-# Pinned Hermes SHA. Our vendor patches (patches/apply-hermes-patches.py)
-# are anchor-matched against this specific tree — bumping the pin means
-# re-checking that every patch's anchor still exists upstream. Consumers
-# can override at build time (`docker build --build-arg HERMES_GIT_REF=...`)
-# but the default is the version we test against.
-ARG HERMES_GIT_REF=ff9752410a8dba62f1b246aeed9142893c75b4ba
+# Pinned Hermes SHA on our fork (yulonghe97/hermes-agent, branch
+# `hellyeah/base`). The fork carries our vendor patches as real commits
+# on top of a known-good upstream SHA — bumping this pin means rebasing
+# `hellyeah/patches` onto a new base in the fork first. Consumers can
+# override at build time (`docker build --build-arg HERMES_GIT_REF=...`).
+ARG HERMES_GIT_REF=9a000fe742f914ae3846f00330d3155fcf403241
 
 RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -17,17 +17,10 @@ WORKDIR /opt
 # `git clone --branch` won't accept a bare SHA, so fetch-then-checkout.
 # `--filter=blob:none` keeps the clone small without the hard depth=1
 # limit that would prevent a non-tip SHA from being resolvable.
-RUN git clone --filter=blob:none --no-checkout --recurse-submodules https://github.com/NousResearch/hermes-agent.git \
+RUN git clone --filter=blob:none --no-checkout --recurse-submodules https://github.com/yulonghe97/hermes-agent.git \
   && cd hermes-agent \
   && git checkout "${HERMES_GIT_REF}" \
   && git submodule update --init --recursive
-
-# Apply vendor patches against the Hermes source before install. Each
-# patch is idempotent and guarded by a marker check — remove a patch
-# once it lands in an upstream Hermes release this template's
-# HERMES_GIT_REF resolves to. See patches/apply-hermes-patches.py.
-COPY patches /tmp/patches
-RUN python3 /tmp/patches/apply-hermes-patches.py && rm -rf /tmp/patches
 
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"

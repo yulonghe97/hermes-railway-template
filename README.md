@@ -138,40 +138,38 @@ Entrypoint (`scripts/entrypoint.sh`) does the following:
 
 Docker build arg:
 
-- `HERMES_GIT_REF` (default: a pinned Hermes commit SHA, see Dockerfile)
+- `HERMES_GIT_REF` (default: a pinned SHA on our Hermes fork — see
+  Dockerfile and [`yulonghe97/hermes-agent`](https://github.com/yulonghe97/hermes-agent))
 
-The default is a specific SHA the vendor patches have been tested
-against. Override at build time to track a different upstream ref:
-`docker build --build-arg HERMES_GIT_REF=main ...`. Bumping the
-default SHA means re-running `scripts/test-patches.sh` to verify every
-patch's anchor still exists in the new tree.
+The Dockerfile clones from `yulonghe97/hermes-agent`, a fork of
+`NousResearch/hermes-agent` that carries a small set of extra commits
+on top of a known-good upstream SHA:
 
-## Vendor patches
-
-The Dockerfile applies a small set of vendor patches to the Hermes
-source tree during the builder stage (see `patches/`). Each patch is
-idempotent and marker-guarded, so rebuilding is safe. Current patches:
-
-- **slack-strict-mention** — adds a `slack.strict_mention: true` config
-  key (Hermes PR [#12258](https://github.com/NousResearch/hermes-agent/pull/12258),
+- **`feat(slack): add strict_mention config option`** — adds a
+  `slack.strict_mention: true` config key (same intent as
+  [NousResearch/hermes-agent#12258](https://github.com/NousResearch/hermes-agent/pull/12258),
   still open upstream at time of writing). When enabled, channel
   threads require an explicit `@mention` on every message to trigger
   the bot, instead of auto-replying to any message under a thread
   the bot has touched.
-- **send-message-edit-action** — exposes `action="edit"` on the
-  built-in `send_message` tool so the agent can update a previously-
-  sent message instead of having to post a fresh one. Routes to
-  Slack's `chat.update` via the same token/proxy path the tool uses
-  for `send`. Telegram / Discord / Matrix / etc. return a clear
-  "not yet implemented" error rather than silently falling back to a
-  new send. No upstream PR yet — the plan is to port this back to
-  `NousResearch/hermes-agent` next and drop the patch once it merges.
+- **`feat(send_message): action='edit' for Slack`** — exposes
+  `action="edit"` on the built-in `send_message` tool so the agent
+  can update a previously-sent message via Slack's `chat.update`
+  instead of posting a fresh correction.
+- **`feat(send_message): action='delete' for Slack`** — pairs with
+  edit; lets the agent retract a bad post via `chat.delete` instead
+  of asking a human to clean up.
+- **`fix(mcp_oauth): preserve URL path for RFC 8707 resource match`** —
+  stops `_parse_base_url` from stripping the path, which broke MCP
+  SDK 1.27+'s `resource` validation for servers with non-root paths
+  (e.g. `https://api.read.ai/mcp`).
 
-Remove a patch from `patches/apply-hermes-patches.py` once it lands
-in an upstream Hermes release this template's `HERMES_GIT_REF`
-resolves to. Verify the patches still apply cleanly with
-`scripts/test-patches.sh` (no Docker required — clones Hermes at the
-pinned SHA, runs the script, checks idempotency + markers).
+Override `HERMES_GIT_REF` at build time to track a different fork ref
+or upstream SHA: `docker build --build-arg HERMES_GIT_REF=main ...`.
+Bumping the default pin means rebasing `hellyeah/patches` onto a new
+base SHA in the fork first, then updating this pin to the merge
+commit. When an individual commit lands upstream, drop it from the
+fork via `git rebase` and bump the pin.
 
 ## Local smoke test
 
