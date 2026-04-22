@@ -18,6 +18,11 @@ Current patches:
   `chat.update` under the hood. Without it the agent can send Slack
   messages but not edit them, so corrections have to be posted as
   fresh messages that clutter the thread.
+- **send-message-delete-action** — adds `action="delete"` to the
+  `send_message` tool schema plus a Slack delete path that wraps
+  `chat.delete`. Pairs with the edit patch: without it, the bot can
+  post and correct messages but can't retract a bad one (e.g. a test
+  post in a team channel), and has to ask humans to clean up.
 - **mcp-oauth-preserve-path** — stops `tools.mcp_oauth._parse_base_url`
   from stripping the path before handing the URL to the MCP SDK's
   `OAuthClientProvider`. MCP SDK 1.27+ enforces RFC 8707 resource-URL
@@ -523,6 +528,289 @@ def send_message_edit_action() -> bool:
     return True
 
 
+def send_message_delete_action() -> bool:
+    """Expose `action='delete'` on the `send_message` tool.
+
+    Depends on ``send_message_edit_action`` having run first — this patch's
+    anchors match the *post-edit-patch* state of the file (the schema enum
+    and dispatcher already carry the ``"edit"`` entry). Four insertions:
+
+    1. Extend the action enum from ``["send", "list", "edit"]`` to
+       ``["send", "list", "edit", "delete"]`` and mention delete in the
+       surrounding descriptions.
+    2. Add a ``if action == "delete": return _handle_delete(args)`` branch
+       to the dispatcher, just before the fall-through to ``_handle_send``.
+    3. Insert a ``_handle_delete`` function after ``_handle_edit``. Unlike
+       edit, delete doesn't need a ``message`` — just ``target`` and
+       ``message_id``. Target resolution reuses the same block (including
+       the home-channel fallback).
+    4. Insert ``_delete_on_platform`` + ``_delete_slack`` helpers after
+       ``_edit_slack``. Slack calls ``chat.delete``; other platforms
+       return an explicit "not yet implemented" error.
+    """
+    path = HERMES / "tools" / "send_message_tool.py"
+    src = path.read_text()
+
+    if "_handle_delete" in src and "_delete_slack" in src:
+        return False
+
+    # ── 1. Schema: enum + description ────────────────────────────────
+    enum_old = (
+        '                "enum": ["send", "list", "edit"],\n'
+        '                "description": "Action to perform. \'send\' (default) sends a message. \'list\' returns all available channels/contacts across connected platforms. \'edit\' updates the text of a previously-sent message identified by message_id."\n'
+    )
+    enum_new = (
+        '                "enum": ["send", "list", "edit", "delete"],\n'
+        '                "description": "Action to perform. \'send\' (default) sends a message. \'list\' returns all available channels/contacts across connected platforms. \'edit\' updates the text of a previously-sent message identified by message_id. \'delete\' removes a previously-sent message identified by message_id."\n'
+    )
+    if src.count(enum_old) != 1:
+        raise RuntimeError(
+            f"send_message enum anchor not found (count={src.count(enum_old)}) in {path}. "
+            f"Ensure send_message_edit_action ran first."
+        )
+    src = src.replace(enum_old, enum_new)
+
+    top_desc_old = (
+        '        "Send a message to a connected messaging platform, list available targets, "\n'
+        '        "or edit a previously-sent message.\\n\\n"\n'
+    )
+    top_desc_new = (
+        '        "Send a message to a connected messaging platform, list available targets, "\n'
+        '        "or edit/delete a previously-sent message.\\n\\n"\n'
+    )
+    if src.count(top_desc_old) != 1:
+        raise RuntimeError(
+            f"send_message top-level description anchor not found in {path}."
+        )
+    src = src.replace(top_desc_old, top_desc_new)
+
+    edit_hint_old = (
+        '        "To edit a previously-sent message, use action=\'edit\' with the platform\'s "\n'
+        '        "message ID (e.g. the \'ts\' from a prior Slack send\'s response) in message_id. "\n'
+        '        "Edit is currently supported on Slack."\n'
+    )
+    edit_hint_new = (
+        '        "To edit a previously-sent message, use action=\'edit\' with the platform\'s "\n'
+        '        "message ID (e.g. the \'ts\' from a prior Slack send\'s response) in message_id. "\n'
+        '        "To delete a message, use action=\'delete\' with the same message_id. "\n'
+        '        "Edit and delete are currently supported on Slack."\n'
+    )
+    if src.count(edit_hint_old) != 1:
+        raise RuntimeError(
+            f"send_message edit-hint anchor not found in {path}."
+        )
+    src = src.replace(edit_hint_old, edit_hint_new)
+
+    # ── 2. Dispatcher: add delete branch ─────────────────────────────
+    dispatch_old = (
+        '    if action == "edit":\n'
+        '        return _handle_edit(args)\n'
+        '\n'
+        '    return _handle_send(args)\n'
+    )
+    dispatch_new = (
+        '    if action == "edit":\n'
+        '        return _handle_edit(args)\n'
+        '\n'
+        '    if action == "delete":\n'
+        '        return _handle_delete(args)\n'
+        '\n'
+        '    return _handle_send(args)\n'
+    )
+    if src.count(dispatch_old) != 1:
+        raise RuntimeError(
+            f"send_message dispatcher anchor not found in {path}. "
+            f"Ensure send_message_edit_action ran first."
+        )
+    src = src.replace(dispatch_old, dispatch_new)
+
+    # ── 3. Insert _handle_delete after _handle_edit ──────────────────
+    edit_tail_anchor = (
+        '    except Exception as e:\n'
+        '        return json.dumps(_error(f"Edit failed: {e}"))\n'
+        '\n'
+        '\n'
+        'def _handle_send(args):\n'
+    )
+    delete_handler_block = (
+        '    except Exception as e:\n'
+        '        return json.dumps(_error(f"Edit failed: {e}"))\n'
+        '\n'
+        '\n'
+        'def _handle_delete(args):\n'
+        '    """Delete a previously-sent message on a platform that supports it.\n'
+        '\n'
+        '    Mirrors _handle_edit minus the `message` field: delete only needs\n'
+        '    target + message_id. Target parsing, channel-directory resolution,\n'
+        '    and the home-channel fallback for bare targets all match the send\n'
+        '    path so the tool stays symmetric.\n'
+        '    """\n'
+        '    target = args.get("target", "")\n'
+        '    message_id = args.get("message_id", "")\n'
+        '    if not target or not message_id:\n'
+        '        return tool_error(\n'
+        '            "\'target\' and \'message_id\' are both required when action=\'delete\'"\n'
+        '        )\n'
+        '\n'
+        '    parts = target.split(":", 1)\n'
+        '    platform_name = parts[0].strip().lower()\n'
+        '    target_ref = parts[1].strip() if len(parts) > 1 else None\n'
+        '    chat_id = None\n'
+        '    thread_id = None\n'
+        '\n'
+        '    if target_ref:\n'
+        '        chat_id, thread_id, is_explicit = _parse_target_ref(platform_name, target_ref)\n'
+        '    else:\n'
+        '        is_explicit = False\n'
+        '\n'
+        '    if target_ref and not is_explicit:\n'
+        '        try:\n'
+        '            from gateway.channel_directory import resolve_channel_name\n'
+        '            resolved = resolve_channel_name(platform_name, target_ref)\n'
+        '            if resolved:\n'
+        '                chat_id, thread_id, _ = _parse_target_ref(platform_name, resolved)\n'
+        '            else:\n'
+        '                return json.dumps({\n'
+        '                    "error": f"Could not resolve \'{target_ref}\' on {platform_name}. "\n'
+        '                    f"Use send_message(action=\'list\') to see available targets."\n'
+        '                })\n'
+        '        except Exception:\n'
+        '            return json.dumps({\n'
+        '                "error": f"Could not resolve \'{target_ref}\' on {platform_name}. "\n'
+        '                f"Try using a numeric channel ID instead."\n'
+        '            })\n'
+        '\n'
+        '    from tools.interrupt import is_interrupted\n'
+        '    if is_interrupted():\n'
+        '        return tool_error("Interrupted")\n'
+        '\n'
+        '    try:\n'
+        '        from gateway.config import load_gateway_config, Platform\n'
+        '        config = load_gateway_config()\n'
+        '    except Exception as e:\n'
+        '        return json.dumps(_error(f"Failed to load gateway config: {e}"))\n'
+        '\n'
+        '    platform_map = {\n'
+        '        "slack": Platform.SLACK,\n'
+        '    }\n'
+        '    platform = platform_map.get(platform_name)\n'
+        '    if not platform:\n'
+        '        return tool_error(\n'
+        '            f"action=\'delete\' is not yet implemented for platform \'{platform_name}\'. "\n'
+        '            f"Currently supported: {\', \'.join(sorted(platform_map.keys()))}."\n'
+        '        )\n'
+        '\n'
+        '    pconfig = config.platforms.get(platform)\n'
+        '    if not pconfig or not pconfig.enabled:\n'
+        '        return tool_error(\n'
+        '            f"Platform \'{platform_name}\' is not configured. "\n'
+        '            f"Set up credentials in ~/.hermes/config.yaml or environment variables."\n'
+        '        )\n'
+        '\n'
+        '    if not chat_id:\n'
+        '        home = config.get_home_channel(platform)\n'
+        '        if home:\n'
+        '            chat_id = home.chat_id\n'
+        '        else:\n'
+        '            return tool_error(\n'
+        '                f"No home channel set for {platform_name} and no explicit chat_id "\n'
+        '                f"in target. For delete, specify \'{platform_name}:<chat_id>\' so the "\n'
+        '                f"delete hits the same channel as the original message."\n'
+        '            )\n'
+        '\n'
+        '    try:\n'
+        '        from model_tools import _run_async\n'
+        '        result = _run_async(\n'
+        '            _delete_on_platform(platform, pconfig, chat_id, message_id)\n'
+        '        )\n'
+        '        if isinstance(result, dict) and "error" in result:\n'
+        '            result["error"] = _sanitize_error_text(result["error"])\n'
+        '        return json.dumps(result)\n'
+        '    except Exception as e:\n'
+        '        return json.dumps(_error(f"Delete failed: {e}"))\n'
+        '\n'
+        '\n'
+        'def _handle_send(args):\n'
+    )
+    if src.count(edit_tail_anchor) != 1:
+        raise RuntimeError(
+            f"_handle_edit tail anchor not found (count={src.count(edit_tail_anchor)}) in {path}."
+        )
+    src = src.replace(edit_tail_anchor, delete_handler_block)
+
+    # ── 4. Insert _delete_on_platform + _delete_slack after _edit_slack
+    edit_slack_tail_anchor = (
+        '    except Exception as e:\n'
+        '        return _error(f"Slack edit failed: {e}")\n'
+        '\n'
+        '\n'
+        'async def _send_whatsapp(extra, chat_id, message):\n'
+    )
+    delete_helpers_block = (
+        '    except Exception as e:\n'
+        '        return _error(f"Slack edit failed: {e}")\n'
+        '\n'
+        '\n'
+        'async def _delete_on_platform(platform, pconfig, chat_id, message_id):\n'
+        '    """Dispatch a delete to the correct platform helper.\n'
+        '\n'
+        '    Mirrors `_edit_on_platform`. Only Slack is wired today; other\n'
+        '    platforms return "not yet implemented" so callers can\'t silently\n'
+        '    no-op.\n'
+        '    """\n'
+        '    from gateway.config import Platform\n'
+        '\n'
+        '    if platform == Platform.SLACK:\n'
+        '        return await _delete_slack(pconfig.token, chat_id, message_id)\n'
+        '\n'
+        '    return {\n'
+        '        "error": (\n'
+        '            f"action=\'delete\' is not yet implemented for {platform.value}. "\n'
+        '            f"Currently supported: slack."\n'
+        '        )\n'
+        '    }\n'
+        '\n'
+        '\n'
+        'async def _delete_slack(token, chat_id, message_id):\n'
+        '    """Delete a Slack message via chat.delete."""\n'
+        '    try:\n'
+        '        import aiohttp\n'
+        '    except ImportError:\n'
+        '        return {"error": "aiohttp not installed. Run: pip install aiohttp"}\n'
+        '    try:\n'
+        '        from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_aiohttp\n'
+        '        _proxy = resolve_proxy_url()\n'
+        '        _sess_kw, _req_kw = proxy_kwargs_for_aiohttp(_proxy)\n'
+        '        url = "https://slack.com/api/chat.delete"\n'
+        '        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}\n'
+        '        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30), **_sess_kw) as session:\n'
+        '            payload = {"channel": chat_id, "ts": message_id}\n'
+        '            async with session.post(url, headers=headers, json=payload, **_req_kw) as resp:\n'
+        '                data = await resp.json()\n'
+        '                if data.get("ok"):\n'
+        '                    return {\n'
+        '                        "success": True,\n'
+        '                        "platform": "slack",\n'
+        '                        "chat_id": data.get("channel", chat_id),\n'
+        '                        "message_id": data.get("ts", message_id),\n'
+        '                    }\n'
+        '                return _error(f"Slack API error: {data.get(\'error\', \'unknown\')}")\n'
+        '    except Exception as e:\n'
+        '        return _error(f"Slack delete failed: {e}")\n'
+        '\n'
+        '\n'
+        'async def _send_whatsapp(extra, chat_id, message):\n'
+    )
+    if src.count(edit_slack_tail_anchor) != 1:
+        raise RuntimeError(
+            f"_edit_slack tail anchor not found (count={src.count(edit_slack_tail_anchor)}) in {path}."
+        )
+    src = src.replace(edit_slack_tail_anchor, delete_helpers_block)
+
+    path.write_text(src)
+    return True
+
+
 def mcp_oauth_preserve_path() -> bool:
     """Keep the URL path when handing the server URL to MCP's OAuthClientProvider.
 
@@ -573,6 +861,7 @@ def main() -> None:
         return
     _apply("slack-strict-mention", slack_strict_mention)
     _apply("send-message-edit-action", send_message_edit_action)
+    _apply("send-message-delete-action", send_message_delete_action)
     _apply("mcp-oauth-preserve-path", mcp_oauth_preserve_path)
 
 

@@ -61,6 +61,12 @@ expect '_handle_edit' 'tools/send_message_tool.py'
 expect '_edit_slack' 'tools/send_message_tool.py'
 expect 'chat.update' 'tools/send_message_tool.py'
 
+# send-message-delete-action
+expect '"delete"' 'tools/send_message_tool.py'
+expect '_handle_delete' 'tools/send_message_tool.py'
+expect '_delete_slack' 'tools/send_message_tool.py'
+expect 'chat.delete' 'tools/send_message_tool.py'
+
 echo
 echo "--- Syntax check patched files ---"
 python3 -c "import ast; ast.parse(open('${TMP}/hermes-agent/tools/send_message_tool.py').read()); print('  OK   tools/send_message_tool.py')"
