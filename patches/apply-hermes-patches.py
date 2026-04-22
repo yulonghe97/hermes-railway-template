@@ -18,6 +18,12 @@ Current patches:
   `chat.update` under the hood. Without it the agent can send Slack
   messages but not edit them, so corrections have to be posted as
   fresh messages that clutter the thread.
+- **mcp-oauth-preserve-path** — stops `tools.mcp_oauth._parse_base_url`
+  from stripping the path before handing the URL to the MCP SDK's
+  `OAuthClientProvider`. MCP SDK 1.27+ enforces RFC 8707 resource-URL
+  matching against the `resource` field of the OAuth Protected Resource
+  Metadata; for resources with a non-root path (e.g.
+  `https://api.read.ai/mcp`) the stripped origin fails the check.
 
 Remove a patch from this file once it lands in an upstream Hermes
 release that is resolved by this template's `HERMES_GIT_REF`.
@@ -517,12 +523,57 @@ def send_message_edit_action() -> bool:
     return True
 
 
+def mcp_oauth_preserve_path() -> bool:
+    """Keep the URL path when handing the server URL to MCP's OAuthClientProvider.
+
+    Hermes's ``tools.mcp_oauth._parse_base_url`` pre-strips the path before
+    constructing the provider. MCP SDK 1.27+ validates that the server URL
+    matches the ``resource`` field in the Protected Resource Metadata
+    document (RFC 8707 / 9728). For resources with a non-root path — e.g.
+    Read AI at ``https://api.read.ai/mcp`` — the PRM publishes the full URL,
+    so the stripped origin fails the check with:
+
+        Protected resource https://api.read.ai/mcp does not match expected
+        https://api.read.ai
+
+    The SDK already strips the path internally where it's actually needed
+    (its ``get_authorization_base_url`` uses scheme+netloc for authorization
+    endpoints), making Hermes's own strip redundant and now harmful.
+    """
+    path = HERMES / "tools" / "mcp_oauth.py"
+    src = path.read_text()
+
+    anchor = (
+        'def _parse_base_url(server_url: str) -> str:\n'
+        '    """Strip path component from server URL, returning the base origin."""\n'
+        '    parsed = urlparse(server_url)\n'
+        '    return f"{parsed.scheme}://{parsed.netloc}"\n'
+    )
+    replacement = (
+        'def _parse_base_url(server_url: str) -> str:\n'
+        '    """Return the server URL unchanged (patched for MCP SDK 1.27+ RFC 8707 resource match)."""\n'
+        '    return server_url\n'
+    )
+
+    if replacement.splitlines()[1] in src:
+        return False  # marker: patched docstring already present
+
+    if src.count(anchor) != 1:
+        raise RuntimeError(
+            f"_parse_base_url anchor not found (count={src.count(anchor)}) in {path}."
+        )
+
+    path.write_text(src.replace(anchor, replacement))
+    return True
+
+
 def main() -> None:
     if not HERMES.exists():
         print(f"Hermes not found at {HERMES}; nothing to patch.")
         return
     _apply("slack-strict-mention", slack_strict_mention)
     _apply("send-message-edit-action", send_message_edit_action)
+    _apply("mcp-oauth-preserve-path", mcp_oauth_preserve_path)
 
 
 if __name__ == "__main__":
