@@ -109,6 +109,24 @@ compression:
 EOF
 fi
 
+# Set agent.reasoning_effort from HERMES_REASONING_EFFORT on every boot.
+# Hermes reads reasoning effort only from config.yaml (agent.reasoning_effort),
+# never from env, so expose it here to make it togglable from Railway Variables
+# without editing the volume. Some models (e.g. gpt-5.6-terra) reject
+# reasoning_effort + function tools on /v1/chat/completions and need it set
+# explicitly. Preserves all other config keys.
+if [[ -n "${HERMES_REASONING_EFFORT:-}" ]]; then
+  echo "[bootstrap] Setting agent.reasoning_effort=${HERMES_REASONING_EFFORT}"
+  CONFIG_FILE="$CONFIG_FILE" HERMES_REASONING_EFFORT="$HERMES_REASONING_EFFORT" python3 - <<'PY'
+import os, yaml
+path = os.environ["CONFIG_FILE"]
+cfg = (yaml.safe_load(open(path)) if os.path.exists(path) else {}) or {}
+cfg.setdefault("agent", {})["reasoning_effort"] = os.environ["HERMES_REASONING_EFFORT"]
+with open(path, "w") as f:
+    yaml.safe_dump(cfg, f, sort_keys=False)
+PY
+fi
+
 if [[ ! -f "$INIT_MARKER" ]]; then
   date -u +"%Y-%m-%dT%H:%M:%SZ" > "$INIT_MARKER"
   echo "[bootstrap] First-time initialization completed."
