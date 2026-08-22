@@ -28,6 +28,11 @@ ENV PATH="/opt/venv/bin:${PATH}"
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 RUN pip install --no-cache-dir -e "/opt/hermes-agent[messaging,cron,cli,pty,mcp]"
 
+# Hellyeah additions: skills that talk to the SOKG Postgres need a DB driver.
+# psycopg2-binary keeps build-time fast (no libpq-dev needed) at runtime cost
+# of bundled libpq — acceptable for our worker container.
+RUN pip install --no-cache-dir psycopg2-binary==2.9.9
+
 
 FROM python:3.11-slim
 
